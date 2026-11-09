@@ -383,22 +383,51 @@ _http = requests.Session()
 _http.headers["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 
+_direct = requests.Session()   # same, but ignores system / environment proxy settings
+_direct.trust_env = False
+_direct.headers.update(_http.headers)
+_proxy_logged = False
+
+
+def _log_proxies_once():
+    global _proxy_logged
+    if _proxy_logged:
+        return
+    _proxy_logged = True
+    try:
+        import urllib.request  # noqa: PLC0415
+        log.info("network: system proxies = %s", urllib.request.getproxies() or "none")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _backend_gtx(text: str, src: str, target: str) -> str:
-    """Google's gtx endpoint (separate from the page deep-translator uses)."""
+    """Google's gtx endpoint (separate from the page deep-translator uses).
+    Tries the system proxy settings first, then a direct connection."""
+    _log_proxies_once()
     delay = 1.5
-    for _ in range(3):
-        r = _http.post(
-            "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "auto", "tl": target, "dt": "t"},
-            data={"q": text}, timeout=20,
-        )
-        if r.status_code in (429, 503):
-            time.sleep(delay)
-            delay *= 2
-            continue
-        r.raise_for_status()
-        return "".join(seg[0] for seg in r.json()[0] if seg and seg[0])
-    raise RuntimeError("Google blocked requests from this IP (HTTP 429)")
+    last = None
+    for sess, label in ((_http, "system settings"), (_direct, "direct, no proxy")):
+        try:
+            for _ in range(3):
+                r = sess.post(
+                    "https://translate.googleapis.com/translate_a/single",
+                    params={"client": "gtx", "sl": "auto", "tl": target, "dt": "t"},
+                    data={"q": text}, timeout=20,
+                )
+                if r.status_code in (429, 503):
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                r.raise_for_status()
+                if sess is _direct:
+                    log.info("network: direct connection worked (system proxy settings did not)")
+                return "".join(seg[0] for seg in r.json()[0] if seg and seg[0])
+            raise RuntimeError("Google blocked requests from this IP (HTTP 429)")
+        except requests.exceptions.ConnectionError as e:
+            log.warning("network: %s failed: %s", label, type(e).__name__)
+            last = e
+    raise last
 
 
 def _backend_deep(text: str, src: str, target: str) -> str:
