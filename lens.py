@@ -74,6 +74,24 @@ def _setup_tesseract():
 
 _setup_tesseract()
 
+
+def _hide_child_consoles():
+    """Windows: stop tesseract.exe (and any other child process) from flashing a
+    console window every time we call it from the windowed app."""
+    if not sys.platform.startswith("win"):
+        return
+    _orig = subprocess.Popen
+
+    class _QuietPopen(_orig):
+        def __init__(self, *a, **kw):
+            kw["creationflags"] = kw.get("creationflags", 0) | 0x08000000  # CREATE_NO_WINDOW
+            super().__init__(*a, **kw)
+
+    subprocess.Popen = _QuietPopen
+
+
+_hide_child_consoles()
+
 # name -> (translator code, tesseract code)
 LANGS = {
     "English": ("en", "eng"),
