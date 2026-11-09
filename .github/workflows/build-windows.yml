@@ -27,7 +27,7 @@ jobs:
           # language data for every language the app offers
           $langs = "eng","tur","deu","fra","spa","ita","por","nld","pol","rus","ukr","ell","ara","jpn","kor","chi_sim"
           foreach ($l in $langs) {
-            Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata" `
+            Invoke-WebRequest "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/$l.traineddata" `
               -OutFile "tesseract\tessdata\$l.traineddata" `
               -MaximumRetryCount 6 -RetryIntervalSec 10
           }
