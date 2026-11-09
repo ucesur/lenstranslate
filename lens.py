@@ -506,7 +506,7 @@ def translate_blocks(blocks: list, src: str, target: str) -> list:
 
 
 class Worker(QThread):
-    done = Signal(list, int)
+    done = Signal(object, int)   # 'object': pass the Python list as-is (no Qt conversion/copy)
     failed = Signal(str, int)
 
     def __init__(self, img, ocr_lang, src, target, gen):
