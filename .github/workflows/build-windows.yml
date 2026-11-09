@@ -1,0 +1,53 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:      # run manually from the Actions tab
+  push:
+    tags: ["v*"]          # or push a tag like v1.0 (also creates a release)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Tesseract and bundle it with the app
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          Copy-Item "C:\Program Files\Tesseract-OCR" -Destination tesseract -Recurse
+          # language data for every language the app offers
+          $langs = "eng","tur","deu","fra","spa","ita","por","nld","pol","rus","ukr","ell","ara","jpn","kor","chi_sim"
+          foreach ($l in $langs) {
+            Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata" `
+              -OutFile "tesseract\tessdata\$l.traineddata"
+          }
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller --noconfirm --onedir --windowed --name LensTranslate --add-data "tesseract;tesseract" lens.py
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\LensTranslate -DestinationPath LensTranslate-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LensTranslate-windows
+          path: LensTranslate-windows.zip
+
+      - name: Attach to release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LensTranslate-windows.zip
