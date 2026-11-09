@@ -1,10 +1,10 @@
-[tutorial.webm](https://github.com/user-attachments/assets/4af927a2-90a4-4d51-9e64-5b2633acfb62)
-
 # LensTranslate
 
 A floating magnifier-style window. Put it over any text on screen (browser, PDF,
 video subtitles, apps) and it translates the text inside it, in place.
 It is a standalone app, not a browser plugin.
+
+[tutorial.webm](https://github.com/user-attachments/assets/4af927a2-90a4-4d51-9e64-5b2633acfb62)
 
 ## Install (Ubuntu)
 
