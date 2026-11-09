@@ -24,6 +24,7 @@ import sys
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -49,7 +50,8 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
 )
-from PySide6.QtWidgets import QApplication, QFontDialog, QMenu, QWidget
+from PySide6.QtWidgets import (QApplication, QFontDialog, QMenu, QPlainTextEdit,
+                               QWidget)
 
 def _setup_tesseract():
     """Find tesseract on Windows / inside a PyInstaller bundle when it is not on PATH."""
@@ -91,6 +93,62 @@ def _hide_child_consoles():
 
 
 _hide_child_consoles()
+
+
+# --------------------------------------------------------------------------
+# Logging: file + in-memory buffer (shown from the right-click menu)
+# --------------------------------------------------------------------------
+import logging
+import logging.handlers
+from collections import deque
+
+LOG_BUFFER: deque = deque(maxlen=2000)
+
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record):
+        LOG_BUFFER.append(self.format(record))
+
+
+def _log_path() -> str:
+    """lens.log next to the exe (or lens.py); falls back to a per-user folder
+    when that location is not writable (e.g. Program Files)."""
+    if getattr(sys, "frozen", False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform.startswith("win"):
+        user = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "LensTranslate")
+    else:
+        user = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "LensTranslate")
+    for d in (os.path.join(app_dir, "logs"), user):
+        try:
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, "lens.log")
+            open(path, "a").close()
+            return path
+        except OSError:
+            continue
+    raise OSError("no writable log folder")
+
+
+log = logging.getLogger("lens")
+log.setLevel(logging.DEBUG)
+_fmt = logging.Formatter("%(asctime)s.%(msecs)03d [%(threadName)s] %(message)s", "%H:%M:%S")
+_bh = _BufferHandler()
+_bh.setFormatter(_fmt)
+log.addHandler(_bh)
+try:
+    LOG_FILE = _log_path()
+    _fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=500_000, backupCount=1, encoding="utf-8")
+    _fh.setFormatter(_fmt)
+    log.addHandler(_fh)
+except OSError:
+    LOG_FILE = ""
+if not getattr(sys, "frozen", False):
+    _sh = logging.StreamHandler(sys.stderr)
+    _sh.setFormatter(_fmt)
+    log.addHandler(_sh)
 
 # name -> (translator code, tesseract code)
 LANGS = {
@@ -164,6 +222,8 @@ def _wayland_screenshot() -> Image.Image:
 
 def grab_region(rect: QRect) -> Image.Image:
     """Return a PIL image (physical pixels) of the given global logical rect."""
+    log.info("capture: rect=%d,%d %dx%d  wayland=%s", rect.x(), rect.y(),
+             rect.width(), rect.height(), _is_wayland())
     if _is_wayland():
         full = _wayland_screenshot()
         vg = QGuiApplication.primaryScreen().virtualGeometry()
@@ -250,6 +310,7 @@ def ocr_blocks(img: Image.Image, ocr_lang: str) -> list:
                 f"sudo apt install tesseract-ocr-{code.replace('_', '-')}"
             )
 
+    log.info("ocr: start, image %dx%d, langs=%s", img.width, img.height, ocr_lang)
     up = 2 if img.height < 700 else 1
     gray = ImageOps.autocontrast(ImageOps.grayscale(img))
     if up > 1:
@@ -259,6 +320,7 @@ def ocr_blocks(img: Image.Image, ocr_lang: str) -> list:
         gray, lang=ocr_lang, config="--psm 3", output_type=pytesseract.Output.DICT
     )
 
+    log.info("ocr: tesseract returned %d tokens", len(d["text"]))
     paras = {}
     for i, raw in enumerate(d["text"]):
         word = raw.strip()
@@ -307,6 +369,10 @@ def ocr_blocks(img: Image.Image, ocr_lang: str) -> list:
         first = min(p["lines"].values(), key=lambda v: v[0])
         blocks.append(Block(x0, y0, x1 - x0, y1 - y0, text, bg, fg, font_px,
                             density >= BOLD_DENSITY, first[1] - first[0], pitch))
+    log.info("ocr: %d text block(s) found", len(blocks))
+    for b in blocks[:60]:
+        log.debug("  block @%d,%d %dx%d font=%.0fpx bold=%s: %r", b.x, b.y, b.w, b.h,
+                  b.font_px, b.bold, b.text[:70])
     return blocks[:60]
 
 
@@ -360,10 +426,13 @@ def _translate_call(text: str, src: str, target: str) -> str:
         try:
             out = fn(text, src, target)
             if out:
+                log.info("translate: backend %s ok (%d chars -> %d chars)", name, len(text), len(out))
                 return out
         except ImportError:
+            log.debug("translate: backend %s not installed", name)
             continue  # optional backend not installed
         except Exception as e:  # noqa: BLE001
+            log.warning("translate: backend %s failed: %s", name, str(e).splitlines()[0][:150])
             errors.append(f"{name}: {str(e).splitlines()[0][:90]}")
     raise RuntimeError(" | ".join(errors) or "no translation backend available")
 
@@ -373,6 +442,8 @@ def translate_blocks(blocks: list, src: str, target: str) -> list:
     joined with newlines and sent together (chunks under 4500 chars)."""
     todo = [b for b in blocks if (target, b.text) not in _cache]
 
+    log.info("translate: %d block(s), %d cached, %d to send (%s -> %s)",
+             len(blocks), len(blocks) - len(todo), len(todo), src, target)
     chunks, cur, size = [], [], 0
     for b in todo:
         if cur and size + len(b.text) + 1 > 4500:
@@ -409,18 +480,49 @@ class Worker(QThread):
         self.img, self.ocr_lang, self.src, self.target, self.gen = img, ocr_lang, src, target, gen
 
     def run(self):
+        threading.current_thread().name = f"worker-{self.gen}"
+        t0 = time.time()
         try:
             blocks = ocr_blocks(self.img, self.ocr_lang)
             if blocks:
                 blocks = translate_blocks(blocks, self.src, self.target)
+            log.info("worker: done in %.1fs, %d block(s)", time.time() - t0, len(blocks))
             self.done.emit(blocks, self.gen)
         except Exception as e:  # noqa: BLE001 - shown to the user
+            log.exception("worker: FAILED after %.1fs", time.time() - t0)
             self.failed.emit(str(e), self.gen)
 
 
 # --------------------------------------------------------------------------
 # The lens window
 # --------------------------------------------------------------------------
+class LogWindow(QPlainTextEdit):
+    """Live view of LOG_BUFFER."""
+
+    def __init__(self):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.setWindowTitle(f"LensTranslate log  -  {LOG_FILE or '(no file)'}")
+        self.resize(900, 420)
+        self._n = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start(400)
+        self._refresh()
+
+    def _refresh(self):
+        lines = list(LOG_BUFFER)
+        if len(lines) == self._n:
+            return
+        bar = self.verticalScrollBar()
+        at_end = bar.value() >= bar.maximum() - 4
+        self.setPlainText("\n".join(lines))
+        self._n = len(lines)
+        if at_end:
+            bar.setValue(bar.maximum())
+
+
 class Lens(QWidget):
     TOP = 10   # top strip height (drag handle)
     M = 5      # frame thickness (left / right / bottom)
@@ -587,6 +689,8 @@ class Lens(QWidget):
     # ---- translate --------------------------------------------------------
     def translate_now(self):
         self.gen += 1
+        log.info("--- translate #%d requested (%s -> %s)", self.gen,
+                 "+".join(self.sources), self.target)
         self.blocks = []
         self.show_overlay = True
         self.status = "Capturing..."
@@ -601,10 +705,12 @@ class Lens(QWidget):
         try:
             img = grab_region(self.capture_rect())
         except Exception as e:  # noqa: BLE001
+            log.exception("capture failed")
             self.status = f"Capture failed: {e}"
             self.update()
             return
         self.img_size = img.size
+        log.info("capture: got %dx%d image, starting worker", *img.size)
         self.status = "Reading + translating..."
         self.update()
         ocr_lang = "+".join(LANGS[s][1] for s in self.sources)
@@ -618,7 +724,9 @@ class Lens(QWidget):
 
     def _on_done(self, blocks, gen):
         if gen != self.gen:
+            log.info("result for #%d ignored (stale, now #%d)", gen, self.gen)
             return
+        log.info("result #%d shown: %d block(s)", gen, len(blocks))
         self.blocks = blocks
         self.status = f"{len(blocks)} text block(s)" if blocks else "No text found"
         self.update()
@@ -626,6 +734,7 @@ class Lens(QWidget):
     def _on_failed(self, msg, gen):
         if gen != self.gen:
             return
+        log.error("error #%d: %s", gen, msg.splitlines()[0] if msg else msg)
         self.status = msg.splitlines()[0][:120]
         self.update()
         print("LensTranslate error:", msg, file=sys.stderr)
@@ -748,8 +857,16 @@ class Lens(QWidget):
             m.addAction("Use system font again", self._reset_font)
         self._border_menu(m)
         m.addSeparator()
+        m.addAction("Show log...", self._show_log)
+        m.addSeparator()
         m.addAction("Quit  (Esc)", self.close)
         m.exec(e.globalPos())
+
+    def _show_log(self):
+        if getattr(self, "_logwin", None) is None:
+            self._logwin = LogWindow()
+        self._logwin.show()
+        self._logwin.raise_()
 
     @staticmethod
     def _clamp(v, lo, hi):
@@ -808,6 +925,8 @@ class Lens(QWidget):
 
     # ---- shutdown ---------------------------------------------------------
     def closeEvent(self, e):
+        if getattr(self, "_logwin", None) is not None:
+            self._logwin.close()
         g = self.geometry()
         self.settings.setValue("geometry", f"{g.x()},{g.y()},{g.width()},{g.height()}")
         self.settings.setValue("target", self.target)
