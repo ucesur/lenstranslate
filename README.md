@@ -1,3 +1,5 @@
+[tutorial.webm](https://github.com/user-attachments/assets/4af927a2-90a4-4d51-9e64-5b2633acfb62)
+
 # LensTranslate
 
 A floating magnifier-style window. Put it over any text on screen (browser, PDF,
