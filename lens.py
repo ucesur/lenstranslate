@@ -432,7 +432,12 @@ def _translate_call(text: str, src: str, target: str) -> str:
             log.debug("translate: backend %s not installed", name)
             continue  # optional backend not installed
         except Exception as e:  # noqa: BLE001
-            log.warning("translate: backend %s failed: %s", name, str(e).splitlines()[0][:150])
+            root = e
+            while root.__cause__ or root.__context__:
+                root = root.__cause__ or root.__context__
+            log.warning("translate: backend %s failed: %s: %s | root cause: %s: %s", name,
+                        type(e).__name__, str(e).splitlines()[0][:100],
+                        type(root).__name__, str(root)[:300])
             errors.append(f"{name}: {str(e).splitlines()[0][:90]}")
     raise RuntimeError(" | ".join(errors) or "no translation backend available")
 
