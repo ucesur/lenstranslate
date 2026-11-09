@@ -43,6 +43,7 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QGuiApplication,
@@ -587,6 +588,7 @@ class Lens(QWidget):
         self.show_overlay = True
         self.img_size = (1, 1)
         self.workers = []
+        self._cursor_shape = None
         self.status = "Space = translate  |  right-click = menu"
         self.gen = 0
         self.worker = None
@@ -817,12 +819,14 @@ class Lens(QWidget):
                 cur = Qt.SizeVerCursor
             else:
                 cur = Qt.SizeAllCursor if pos.y() < self.TOP else Qt.CrossCursor
-            self.setCursor(cur)
+            if cur != self._cursor_shape:          # only touch Qt when it actually changes
+                self._cursor_shape = cur
+                self.setCursor(QCursor(cur))
             return
         start, geo, edges = self._drag
         d = e.globalPosition().toPoint() - start
         if not edges:
-            self.move(geo.topLeft() + d)
+            self.move(geo.x() + d.x(), geo.y() + d.y())   # plain ints, no overload/QPoint conversion
             return
         x, y, w, h = geo.x(), geo.y(), geo.width(), geo.height()
         if edges & Qt.RightEdge:
